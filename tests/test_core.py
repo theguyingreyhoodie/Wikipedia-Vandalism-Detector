@@ -219,3 +219,30 @@ def test_delayed_performance_only_scores_matured_predictions(tmp_path):
     assert out["overall"]["positives"] == 2
     assert out["overall"]["pr_auc"] == 1.0 and out["overall"]["precision"] == 1.0
 
+
+def test_stream_survives_unexpected_errors(monkeypatch):
+    """Regression: a FileNotFoundError while building the TLS context killed the reader thread."""
+    import contextlib
+
+    import wikivand.sse as sse
+
+    calls = {"n": 0}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def iter_raw(self, chunk_size):
+            yield b'id: [1]\ndata: {"ok": 1}\n\n'
+
+    @contextlib.contextmanager
+    def fake_stream(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FileNotFoundError(2, "No such file or directory")
+        yield FakeResponse()
+
+    monkeypatch.setattr(sse.httpx, "stream", fake_stream)
+    monkeypatch.setattr(sse.time, "sleep", lambda s: None)
+    events = sse.iter_events(["s"], base_url="https://x/", user_agent="t")
+    assert next(events) == {"ok": 1} and calls["n"] == 2

@@ -90,6 +90,12 @@ def iter_events(
             log.warning("stream disconnected (%s); reconnecting in %.0fs", e, backoff)
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
+        except Exception as e:  # noqa: BLE001
+            # Anything else (e.g. a transient FileNotFoundError loading the CA
+            # bundle) must not kill a long-running reader thread.
+            log.exception("unexpected stream error (%r); reconnecting in %.0fs", e, backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
 
 def iter_merged(streams: list[str], *, base_url: str, user_agent: str, since: str | None = None,
