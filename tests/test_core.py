@@ -190,3 +190,32 @@ def test_short_window_does_not_truncate_long_window():
     assert snap["page_edits_1h"] == 1
     assert snap["page_edits_12h"] == 3
     assert s.snapshot(edit(10, 5 * 3600 + 61, "X"))["page_edits_12h"] == 3  # still 3 after a 1h count
+
+
+def test_delayed_performance_only_scores_matured_predictions(tmp_path):
+    """Live predictions get evaluated once their labels mature; recent ones stay pending."""
+    from wikivand.config import Config
+    from wikivand.monitor import delayed_performance
+    from wikivand.storage import write_batch
+
+    cfg = Config(data_dir=tmp_path)
+    T = 1_791_000_000
+    scored = [edit(i, T + 60 * i, f"U{i}", title=f"P{i}") for i in range(1, 7)]
+    fixes = [edit(100 + i, T + 60 * i + 30, "Fixer", title=f"P{i}") for i in (1, 2)]
+    recent = edit(7, T + 10 * 3600, "U7", title="P7")  # 1h before coverage end: pending
+    tail = edit(8, T + 11 * 3600, "U8", title="P8")  # extends edit-stream coverage
+    write_batch(cfg.raw_dir, "edits", scored + fixes + [recent, tail], "timestamp")
+    write_batch(cfg.reverts_dir, "reverts",
+                [revert(i, T + 60 * i, T + 60 * i + 31, f"P{i}") for i in (1, 2)]
+                + [revert(8, T + 11 * 3600, T + 11 * 3600 + 5, "P8")], "revert_ts")
+
+    pred = pd.DataFrame({
+        "wiki": "enwiki", "revision_new": [1, 2, 3, 4, 5, 6, 7],
+        "timestamp": [e["timestamp"] for e in scored] + [recent["timestamp"]],
+        "score": [0.9, 0.8, 0.3, 0.2, 0.1, 0.1, 0.95],
+    })
+    out = delayed_performance(cfg, pred, threshold=0.5)
+    assert out["matured"] == 6 and out["pending"] == 1
+    assert out["overall"]["positives"] == 2
+    assert out["overall"]["pr_auc"] == 1.0 and out["overall"]["precision"] == 1.0
+
