@@ -225,6 +225,28 @@ The diff round trip is 97% of the time; the model side is about 25 ms. Live
 score PSI against the training reference was 0.037, with no feature above
 0.25, so there was no drift flag. The live alert rate was 26.7 per 1,000 edits.
 
+**Delayed evaluation on live traffic.** `serve` scored live edits on
+2026-10-12 with the champion model. After every prediction's 6h horizon had
+passed, `monitor` joined the predictions with the labels that had arrived since:
+
+| | live (matured) | offline test |
+|---|---|---|
+| scored edits evaluated | 11,948 | 7,600 |
+| reverted | 583 (4.9%) | 2,434 (4.3%) |
+| PR-AUC | **0.377** (95% bootstrap CI 0.33–0.42) | 0.388 |
+| ROC-AUC | 0.874 | 0.877 |
+| precision / recall at threshold | 49.4% / 28.1% | 53.5% / 30.9% |
+| precision in top 1% | 71.7% | 73.7% |
+
+The model performed on live traffic as offline testing predicted: the offline
+PR-AUC sits inside the live confidence interval, and live precision landed on
+the 50% target. Score PSI over the run was 0.014. 13k predictions from the
+second half of the run were still `pending` at evaluation time, as designed.
+
+Tail latency was worse over the longer run: p99 was 7.9 s against a p50 of 679 ms.
+In busy hours the diff API slowed (p99 2.7 s), and edits queued behind it for up
+to ~5 s. The model side stayed under 40 ms at p99.
+
 **Edit wars.** Replaying the week through the detector gave 57 alerts.
 
 **Data caveats.** 148 diffs were already revision-deleted when fetched (89% of
@@ -247,6 +269,12 @@ which is unrelated to labels.
 * **Rate limits are by identity.** Send a User-Agent with contact info, pace
   requests process-wide, and honour `Retry-After` (`diffs.RateLimiter`).
 * **SIGTERM flushes buffers**, so `kill` doesn't drop the last minute of events.
+* **A reader thread must survive any exception, not just network errors.**
+  During the live evaluation, one reconnect failed with a transient
+  `FileNotFoundError` while loading the TLS CA bundle. That killed the
+  edit-stream thread while the revert stream carried on, so nothing was scored
+  for 3h. `iter_events` now logs and reconnects on any error, and the gap was
+  re-filled with `ingest --since/--until`.
 
 ## Known limitations
 * "Reverted" ≠ "vandalism". Good-faith mistakes, content disputes and
