@@ -171,10 +171,14 @@ class Runner:
             line += f" | latency p50={p50:.0f}ms p95={p95:.0f}ms p99={p99:.0f}ms"
         print(line, flush=True)
 
-    def run(self, since: str | None = None, duration_s: float | None = None) -> None:
+    def run(self, since: str | None = None, duration_s: float | None = None,
+            until: float | None = None) -> None:
+        """Stream until Ctrl-C, `duration_s` wall seconds, or until BOTH streams have
+        reached event time `until` (for replaying history in parallel segments)."""
         if not since:
             self.warm_up()
         started = last_flush = time.time()
+        reached = [0.0, 0.0]  # latest event time seen on the edit / revert stream
         events = iter_merged([EDIT_STREAM, TAGS_STREAM], base_url=self.cfg.stream_url,
                              user_agent=self.cfg.user_agent, since=since,
                              contains=f'"{self.cfg.wiki}"'.encode())
@@ -185,11 +189,13 @@ class Runner:
                     e = edit_row(ev)
                     if e:
                         self.stats["edits"] += 1
+                        reached[0] = max(reached[0], e["timestamp"])
                         self._on_edit(e)
                 elif stream == TAGS_STREAM and ev.get("database") == self.cfg.wiki:
                     r = revert_row(ev)
                     if r:
                         self.stats["reverts"] += 1
+                        reached[1] = max(reached[1], r["revert_ts"])
                         with self.lock:
                             self.buf["reverts"].append(r)
                         self.state.observe_revert(r)
@@ -198,6 +204,8 @@ class Runner:
                     self.flush()
                     self._status(started)
                     last_flush = now
+                if until and min(reached) >= until:
+                    break
                 if duration_s and now - started >= duration_s:
                     break
         except KeyboardInterrupt:

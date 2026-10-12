@@ -46,11 +46,18 @@ def _fmt(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
 
 
+def _parse_iso(ts: str) -> float:
+    from .events import parse_ts
+
+    return parse_ts(ts)
+
+
 def cmd_ingest(a, cfg):
     from .serve import Runner
 
     Runner(cfg, score=False, fetch_diffs=not a.no_diffs, workers=a.workers, flush_s=a.flush).run(
-        since=a.since, duration_s=a.minutes * 60 if a.minutes else None)
+        since=a.since, duration_s=a.minutes * 60 if a.minutes else None,
+        until=_parse_iso(a.until) if a.until else None)
 
 
 def cmd_serve(a, cfg):
@@ -207,6 +214,7 @@ def main(argv=None):
     s = sub.add_parser("ingest", help="record edits + revert labels from EventStreams")
     s.add_argument("--since", help="replay from ISO time (EventStreams keeps ~7 days)")
     s.add_argument("--no-diffs", action="store_true", help="don't fetch diffs at ingest time")
+    s.add_argument("--until", help="stop once both streams reach this ISO time (segmented replay)")
     s.add_argument("--workers", type=int, default=8)
     s.add_argument("--minutes", type=float)
     s.add_argument("--flush", type=float, default=60)

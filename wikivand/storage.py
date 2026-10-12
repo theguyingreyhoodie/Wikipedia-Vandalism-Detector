@@ -5,6 +5,7 @@ can produce duplicates, so readers de-duplicate on a key.
 """
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,8 @@ def write_batch(base: Path, prefix: str, rows: list[dict], ts_col: str) -> None:
     for date, part in df.groupby(dates):
         d = base / f"date={date}"
         d.mkdir(parents=True, exist_ok=True)
-        part.to_parquet(d / f"{prefix}_{stamp}.parquet", index=False)
+        # pid keeps parallel writers (segmented replays) from clobbering each other
+        part.to_parquet(d / f"{prefix}_{stamp}_{os.getpid()}.parquet", index=False)
 
 
 def read_table(
