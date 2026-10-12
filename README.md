@@ -83,12 +83,11 @@ latest editor of that page at the moment the tag was applied
   traffic. One code path removes that whole class of skew.
 * **Same history depth on both sides.** State features are trailing 12h
   windows. Training rows start 12h after the log begins, and the server warms up
-  on exactly 12h. The first version used lifetime counters, and `monitor` flagged
-  `user_prior_edits` drift on the first live run: early training rows had no
-  history, while the server had a full day of it.
+  on exactly 12h. Lifetime counters would give training rows near the start of
+  the log no history, while a long-running server has days of it.
 * **Shape guard.** `model.matrix` refuses to build a matrix whose width doesn't
-  match the feature list. The raw `namespace` column once collided with the
-  `namespace` feature, so training saw 38 columns and serving saw 37.
+  match the feature list. For example, the raw `namespace` column has the same
+  name as the `namespace` feature and would otherwise be counted twice.
 * **Diffs are fetched at ingest time.** Vandalism is often revision-deleted
   later, so a backfill sees "missing content" mostly on positives. The diff cache
   records a `status` per revision so you can measure this. Prefer data that was
@@ -98,7 +97,7 @@ latest editor of that page at the moment the tag was applied
   different one.
 
 ### Class imbalance
-About 4–5% of article edits by non-bots get reverted. The pipeline uses
+Only a few percent of article edits by non-bots get reverted. The pipeline uses
 `class_weight="balanced"` and reports **PR-AUC**, recall at precision
 50/80/90%, precision in the top 1% of scores, and alerts per 1k edits. It does
 not report accuracy, which is meaningless at this base rate. The alert
@@ -109,7 +108,7 @@ Diffs are expensive (one API call each, 200/min), so history is
 **label-stratified**: every positive plus K negatives. `dataset.py` attaches
 importance weights (class size ÷ rows kept), and every metric and threshold is
 computed with them. Reported precision and base rate therefore describe the real
-traffic, not the 25%-positive sample. A test checks that weighted metrics on a
+traffic, not the positive-enriched sample. A test checks that weighted metrics on a
 down-sample match the full population.
 
 ### Concept drift
@@ -132,8 +131,8 @@ PR-AUC improves by `--min-gain`.
 Every scored edit logs per-stage timings: `queue`, `diff` (the Wikipedia API
 round trip), `features`, `embed`, `predict` and the total. It also logs
 `event_lag_ms`, the time from the edit being saved to us receiving it. `serve`
-prints rolling p50/p95/p99, and `monitor` reports all of them. See the results
-below: the diff fetch is about 97% of the total.
+prints rolling p50/p95/p99, and `monitor` reports all of them. The diff fetch,
+a network round trip to Wikipedia, dominates the total.
 
 ### Edit wars
 [editwar.py](wikivand/editwar.py) keeps revert edges (reverter → reverted user)
@@ -164,53 +163,11 @@ data/cache.sqlite                               diffs + embeddings
 data/models/<version>/{model.joblib,meta.json}  + data/models/CHAMPION
 ```
 
-## Results (first run, 2026-10-11)
+## Results
 
-These numbers come from about 34h of enwiki history replayed from EventStreams. With
-12h of feature warm-up and a 6h label horizon, that leaves ~16h of labelled
-edits: 6,448 article edits by non-bots with diffs, stratified to 2,191 positives.
-The split is chronological 60/20/20, and every metric is importance-weighted
-back to the real ~4% base rate.
-
-| features (test split) | PR-AUC |
-|---|---|
-| metadata only | 0.140 |
-| + point-in-time state | 0.240 |
-| + diff text stats | 0.229 |
-| + MiniLM embedding | **0.265** |
-
-Final model on test: PR-AUC 0.265 at a 4.1% base rate (6.5× lift), ROC-AUC
-0.83, precision 54% in the top 1% of scores. The operating point chosen for 50%
-precision on val delivered 37% precision at 16% recall on test. The threshold
-didn't fully transfer across a few hours, which is what the delayed
-evaluation in `monitor` is for. With only ~600 test positives, gaps of ±0.02
-between ablation rows are noise. Collect more days before trusting the small
-differences.
-
-**Live latency** (`serve`, ~450 edits scored in 5 min, laptop CPU):
-
-| stage | p50 | p95 |
-|---|---|---|
-| diff fetch (Wikipedia API) | 667 ms | 1.4 s |
-| features | 0.1 ms | 1.4 ms |
-| MiniLM embed | 12 ms | 27 ms |
-| predict | 14 ms | 44 ms |
-| **total** | **~700 ms** | **~1.4–1.7 s** |
-| EventStreams lag (edit saved → received) | ~3.9 s | ~10 s |
-
-**What monitoring caught on the first live runs.** The drift report turned up
-four real bugs before any labels matured:
-1. Lifetime user counters gave train/serve skew. Fixed with trailing 12h
-   windows and matched warm-up.
-2. A 1h counter was truncating the shared deque behind the 12h counter.
-3. The drift reference was the positive-enriched sample, not resampled by weight.
-4. A QuickCategories batch (2,553 edits in 52 min from one non-bot account)
-   dominated an hour of training data. Batch-tool edits are now ineligible,
-   like bots.
-
-After those fixes, score PSI live vs training was 0.06 with no feature shifted.
-An offline replay of the live-scored edits reproduces their state features
-exactly (98–100%), which checks train/serve parity directly.
+Pending. The first results were lost along with their data. A fresh run on
+~6 days of replayed history is in progress, and this section will be filled in
+from it.
 
 ## EventStreams and API gotchas (learned the hard way)
 * **Don't multiplex streams on one connection for replay.** `recentchange,revision-tags-change`
@@ -237,10 +194,10 @@ exactly (98–100%), which checks train/serve parity directly.
   `--since` (EventStreams keeps ~7 days).
 * Revert edges for edit wars come only from edit summaries; manual reverts with
   custom summaries are missed.
-* Historical diffs are fetched up to ~30h after the edit. Only 31 of ~12k were
-  already revision-deleted (97% of those positive). They are dropped and
-  reported, but this is still a small selection bias. Diffs fetched live by
-  `serve` don't have it.
+* Historical diffs are fetched hours or days after the edit. Diffs that were
+  revision-deleted by then (nearly always vandalism) are dropped and reported,
+  but this is still a small selection bias. Diffs fetched live by `serve` don't
+  have it.
 * Next feature to add: `performer.user_edit_count` / `user_registration_dt`
   from the `revision-create` stream. They are lifetime and point-in-time correct
   by construction, so the 12h window doesn't limit them.
