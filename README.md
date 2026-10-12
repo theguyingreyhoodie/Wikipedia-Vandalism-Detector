@@ -31,6 +31,8 @@ export WIKIVAND_CONTACT="https://github.com/you/your-fork"
 
 # 1. Collect data. --since replays up to ~7 days of history, so you don't have to wait.
 python -m wikivand ingest --since 2026-10-10T00:00:00Z --no-diffs
+# Faster: replay in parallel segments, each stopping at --until
+# python -m wikivand ingest --no-diffs --since 2026-10-05T09:00:00Z --until 2026-10-07T03:00:00Z
 # Diffs for history: every matured positive + 3 random negatives each (re-weighted later)
 python -m wikivand backfill-diffs --days 2 --neg-per-pos 3
 
@@ -46,6 +48,7 @@ python -m wikivand serve
 # 5. Monitor and retrain
 python -m wikivand monitor --hours 24
 python -m wikivand retrain --days 2             # promotes only if it beats the champion
+# --end trains on an older window, e.g. to test whether retraining pays off
 python -m wikivand editwars --days 2            # offline replay of the edit-war detector
 ```
 
@@ -163,11 +166,71 @@ data/cache.sqlite                               diffs + embeddings
 data/models/<version>/{model.joblib,meta.json}  + data/models/CHAMPION
 ```
 
-## Results
+## Results (7-day run, 2026-10-05 → 2026-10-12)
 
-Pending. The first results were lost along with their data. A fresh run on
-~6 days of replayed history is in progress, and this section will be filled in
-from it.
+**Data.** Seven days of English Wikipedia, the most EventStreams keeps: 1.17M
+edits and 139k revert events, replayed in four parallel segments with no gaps
+longer than 5 minutes. Of ~620k matured article edits by non-bot accounts,
+**4.5% were reverted by someone else within 6h**. Diffs were fetched for a random
+42k of {every reverted edit + 2 normal edits each}. That gives 38k training rows
+after the 12h warm-up and the drops below. Every metric is weighted back to the
+real base rate.
+
+**How labels arrive.** The median revert lands 18.5 minutes after the edit, but
+the 90th percentile takes 18h. The 6h horizon captures 79% of reverts. A longer
+horizon catches more slow reverts, but every label then arrives later.
+
+**Feature ablation.** The test split is the newest ~day (7,600 edits, 4.3%
+reverted), with the same split and model for each row:
+
+| features | PR-AUC | ROC-AUC |
+|---|---|---|
+| edit metadata | 0.229 | 0.814 |
+| + point-in-time user/page state | 0.347 | 0.872 |
+| + diff text stats | **0.390** | 0.879 |
+| + MiniLM embedding | 0.388 | 0.879 |
+
+State features and diff text both add clear lift. On top of the hand-built diff
+features, the MiniLM embedding adds nothing measurable at this data size.
+
+**Operating point.** The threshold picked for 50% precision on validation gives
+**58.5% precision at 28% recall** on test, about 21 alerts per 1,000 edits.
+Precision in the top 1% of scores is 72%. PR-AUC is 0.384 on val and 0.388 on
+test, so the threshold transfers.
+
+**Retraining (champion/challenger).** A champion trained only on data up to
+Oct 10 12:00 UTC was compared with a challenger trained on everything up to
+Oct 12 03:00, both scored on the same newest held-out day:
+
+| model | PR-AUC | ROC-AUC | precision / recall at its threshold |
+|---|---|---|---|
+| champion (data to Oct 10) | 0.388 | 0.877 | 53.5% / 30.9% |
+| challenger (data to Oct 12) | 0.388 | 0.879 | 58.5% / 28.1% |
+
+Two extra days bought nothing measurable, so there was no meaningful drift that
+week. The promotion gate (minimum +0.005 PR-AUC) correctly kept the champion.
+
+**Live serving.** `serve` scored 637 edits in 10 minutes, laptop CPU:
+
+| stage | p50 | p95 | p99 |
+|---|---|---|---|
+| diff fetch (Wikipedia API) | 659 ms | 1.65 s | 2.34 s |
+| features | 0.2 ms | 1.5 ms | 3.4 ms |
+| MiniLM embed | 12.8 ms | 26.9 ms | 28.3 ms |
+| predict | 12.6 ms | 36.3 ms | 39.0 ms |
+| **total** | **676 ms** | **1.66 s** | **2.38 s** |
+| EventStreams lag (edit saved → received) | 4.1 s | 11.6 s | 20.6 s |
+
+The diff round trip is 97% of the time; the model side is about 25 ms. Live
+score PSI against the training reference was 0.037, with no feature above
+0.25, so there was no drift flag. The live alert rate was 26.7 per 1,000 edits.
+
+**Edit wars.** Replaying the week through the detector gave 57 alerts.
+
+**Data caveats.** 148 diffs were already revision-deleted when fetched (89% of
+them reverted) and 70 revisions no longer existed. Both groups were dropped.
+Another 255 fetches failed during a brief network outage and were skipped,
+which is unrelated to labels.
 
 ## EventStreams and API gotchas (learned the hard way)
 * **Don't multiplex streams on one connection for replay.** `recentchange,revision-tags-change`
