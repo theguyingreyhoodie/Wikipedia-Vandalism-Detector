@@ -12,8 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from .config import CONFIG
 
 
-def _window(cfg, days: float) -> tuple[float, float, float]:
-    """Training window ending at the newest *matured* edit, based on data coverage."""
+def _window(cfg, days: float, until: str | None = None) -> tuple[float, float, float]:
+    """Training window ending at the newest *matured* edit (or `until`, if earlier)."""
     from .storage import read_edits, read_reverts
 
     edits = read_edits(cfg)
@@ -25,6 +25,8 @@ def _window(cfg, days: float) -> tuple[float, float, float]:
     from .dataset import WARMUP_S
 
     end = coverage_end - cfg.horizon_s
+    if until:  # e.g. train an "old" model to test retraining against later data
+        end = min(end, _parse_iso(until))
     # rows need a full window of history behind them, like the warmed-up server
     start = max(float(edits.timestamp.min()) + WARMUP_S, end - days * 86400)
     if end <= start:
@@ -124,7 +126,7 @@ def cmd_labels(a, cfg):
 def _build(a, cfg):
     from .dataset import build_dataset
 
-    start, end, coverage_end = _window(cfg, a.days)
+    start, end, coverage_end = _window(cfg, a.days, a.end)
     emb = _embedder(a.embedder, cfg)
     print(f"window {_fmt(start)} -> {_fmt(end)}  (horizon {cfg.label_horizon_h}h, "
           f"embedder {emb.name if emb else 'none'})")
@@ -239,6 +241,7 @@ def main(argv=None):
     for name, fn in (("train", cmd_train), ("retrain", cmd_retrain)):
         s = sub.add_parser(name, help="train a model" if name == "train" else "champion/challenger retrain")
         s.add_argument("--days", type=float, default=7, help="training window length")
+        s.add_argument("--end", help="ISO time to end the window at (default: newest matured edit)")
         s.add_argument("--embedder", help="'hashing', 'none' or a sentence-transformers model")
         s.add_argument("--target-precision", type=float, default=0.5,
                        help="alert threshold = lowest score reaching this precision on val")
