@@ -42,7 +42,7 @@ python -m wikivand labels
 # 3. Train (time-ordered 60/20/20 split, threshold picked on val, reported on test)
 python -m wikivand train --days 2 --ablation   # needs > 12h warm-up + 6h horizon of data
 
-# 4. Score live edits; prints 🚩 alerts, ⚔️ edit wars, and latency percentiles every minute
+# 4. Score live edits; prints alerts, edit wars, and latency percentiles every minute
 python -m wikivand serve
 
 # 5. Monitor and retrain
